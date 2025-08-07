@@ -137,7 +137,7 @@ jobs:
           type=raw,value=edge,enable={{is_default_branch}}
           type=ref,event=tag
     - name: Download digests
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v5
       with:
         pattern: RepoDigest-*
         merge-multiple: true
