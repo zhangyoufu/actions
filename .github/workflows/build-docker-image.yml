@@ -70,7 +70,7 @@ jobs:
         - linux/s390x
         - linux/riscv64
     steps:
-    - uses: docker/login-action@v3
+    - uses: docker/login-action@v4
       if: ${{ inputs.push }}
       with:
         registry: ${{ inputs.registry }}
@@ -119,7 +119,7 @@ jobs:
     needs: platform
     runs-on: ubuntu-latest
     steps:
-    - uses: docker/login-action@v3
+    - uses: docker/login-action@v4
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.registry_username }}
