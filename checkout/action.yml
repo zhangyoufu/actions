@@ -4,6 +4,7 @@ runs:
   using: composite
   steps:
     - name: Checkout Git repo
+      shell: bash
       run: |-
         git config --global init.defaultBranch main
         git init .
@@ -14,6 +15,7 @@ runs:
         git checkout --progress FETCH_HEAD
 
     - name: Configure Git user name/email
+      shell: bash
       run: |-
         git config set user.name 'github-actions[bot]'
         git config set user.email '${{ github.actor_id }}+github-actions[bot]@users.noreply.github.com'
