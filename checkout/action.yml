@@ -6,8 +6,7 @@ runs:
     - name: Checkout Git repo
       shell: bash
       run: |-
-        git config --global init.defaultBranch main
-        git init .
+        git init --initial-branch main .
         git remote add origin '${{ github.server_url }}/${{ github.repository }}.git'
         git config set --local advice.detachedHead false
         git config set --local 'http.${{ github.server_url }}.extraHeader' "Authorization: Basic $(echo -n 'x-access-token:${{ github.token }}' | base64 -w0)"
