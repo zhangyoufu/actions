@@ -114,7 +114,7 @@ runs:
 
         ## Download artifact
         ARCHIVE_FILE=$(mktemp)
-        echo 'Downloading...''
+        echo 'Downloading...'
         curl -fsSL -o "${ARCHIVE_FILE}" "${URL}"
 
         ## Verify SHA-256 checksum
