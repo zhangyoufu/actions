@@ -1,0 +1,155 @@
+name: 'Setup uv'
+description: |-
+  Install the uv Python package manager from Astral releases.
+
+  Downloads the latest (or pinned) release manifest from the astral-sh/versions
+  registry, selects the artifact matching the current runner OS and architecture,
+  verifies its SHA-256 checksum, and installs it to /usr/local/bin.
+
+  Requires: curl, jq, tar/gzip/unzip — all pre-installed on GitHub-hosted runners.
+
+inputs:
+  version:
+    description: |-
+      Version of uv to install (e.g. "0.11.24"). When omitted or empty the
+      latest release is used — the first entry in the NDJSON manifest.
+    required: false
+    default: ''
+
+outputs:
+  version:
+    description: 'The version of uv that was installed.'
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        UV_REQUESTED_VERSION: ${{ inputs.version }}
+      run: |-
+        ## Map the GitHub Actions runner to an uv platform triple
+        echo "Runner: ${RUNNER_OS} / ${RUNNER_ARCH}"
+        case "${RUNNER_OS}" in
+          Linux)
+            case "${RUNNER_ARCH}" in
+              X86)   PLATFORM=i686-unknown-linux-gnu;;
+              X64)   PLATFORM=x86_64-unknown-linux-gnu;;
+              ARM64) PLATFORM=aarch64-unknown-linux-gnu;;
+              ARM)   PLATFORM=armv7-unknown-linux-gnueabihf;;
+              *)
+                echo "::error::Unsupported architecture ${RUNNER_ARCH} on Linux"
+                exit 1
+                ;;
+            esac
+            ;;
+          macOS)
+            case "${RUNNER_ARCH}" in
+              X64)   PLATFORM=x86_64-apple-darwin;;
+              ARM64) PLATFORM=aarch64-apple-darwin;;
+              *)
+                echo "::error::Unsupported architecture ${RUNNER_ARCH} on macOS"
+                exit 1
+                ;;
+            esac
+            ;;
+          Windows)
+            case "${RUNNER_ARCH}" in
+              X86)   PLATFORM=i686-pc-windows-msvc;;
+              X64)   PLATFORM=x86_64-pc-windows-msvc;;
+              ARM64) PLATFORM=aarch64-pc-windows-msvc;;
+              *)
+                echo "::error::Unsupported architecture ${RUNNER_ARCH} on Windows"
+                exit 1
+                ;;
+            esac
+            ;;
+          *)
+            echo "::error::Unsupported OS ${RUNNER_OS}"
+            exit 1
+            ;;
+        esac
+        echo "Platform: ${PLATFORM}"
+
+        ## Fetch the NDJSON release manifest
+        echo 'Fetching release manifest...'
+        MANIFEST_URL=https://raw.githubusercontent.com/astral-sh/versions/main/v1/uv.ndjson
+        MANIFEST=$(curl -fsSL "$MANIFEST_URL")
+
+        ## Select the right release document
+        if [ -z "${UV_REQUESTED_VERSION:-}" ]; then
+          DOC=$(head -n1 <<<"${MANIFEST}")
+        else
+          DOC=$(grep -m 1 "\"version\":\"$UV_REQUESTED_VERSION\"" <<<"${MANIFEST}") || true
+          if [ -z "${DOC}" ]; then
+            echo "::error::Version ${UV_REQUESTED_VERSION} not found in manifest"
+            exit 1
+          fi
+        fi
+
+        ## Parse version & date from the selected document
+        VERSION=$(jq -r '.version' <<<"${DOC}")
+        DATE=$(jq -r '.date' <<<"${DOC}")
+
+        echo "Version: ${VERSION}"
+        echo "Date: ${DATE}"
+
+        ## Find the matching artifact for this platform
+        ARTIFACT=$(jq -r --arg p "${PLATFORM}" '.artifacts[] | select(.platform == $p)' <<<"${DOC}") || true
+        if [ -z "${ARTIFACT}" ] || [ "${ARTIFACT}" = 'null' ]; then
+          echo "::error::No artifact found for platform ${PLATFORM} in version ${VERSION}"
+          echo "Available platforms:"
+          jq -r '.artifacts[].platform' <<<"${DOC}" | sed 's/^/  - /'
+          exit 1
+        fi
+
+        URL=$(jq -r '.url' <<<"${ARTIFACT}")
+        EXPECTED_SHA256=$(jq -r '.sha256' <<<"${ARTIFACT}")
+        ARCHIVE_FMT=$(jq -r '.archive_format' <<<"${ARTIFACT}")
+
+        echo "URL: ${URL}"
+        echo "SHA256: ${EXPECTED_SHA256}"
+        echo "Format: ${ARCHIVE_FMT}"
+
+        ## Download artifact
+        ARCHIVE_FILE=$(mktemp)
+        echo 'Downloading...''
+        curl -fsSL -o "${ARCHIVE_FILE}" "${URL}"
+
+        ## Verify SHA-256 checksum
+        echo "Verifying SHA-256 checksum..."
+        ACTUAL_SHA256=$(sha256sum "${ARCHIVE_FILE}" | awk '{print $1}')
+        if [ "${ACTUAL_SHA256}" != "${EXPECTED_SHA256}" ]; then
+          echo "::error::SHA-256 mismatch"
+          echo "Expected: ${EXPECTED_SHA256}"
+          echo "Got:      ${ACTUAL_SHA256}"
+          exit 1
+        fi
+
+        ## Extract to /usr/local/bin
+        echo "Extracting ${ARCHIVE_FMT} archive..."
+        INSTALL_DIR=/usr/local/bin
+        case "${ARCHIVE_FMT}" in
+          tar.gz)
+            sudo tar -xzf "${ARCHIVE_FILE}" -C "${INSTALL_DIR}" --strip-components 1
+            ;;
+          zip)
+            sudo unzip -q "${ARCHIVE_FILE}" -d "${INSTALL_DIR}"
+            ;;
+          *)
+            echo "::error::Unknown archive format ${ARCHIVE_FMT}"
+            exit 1
+            ;;
+        esac
+        rm -f "${ARCHIVE_FILE}"
+
+        ## Verify installation
+        echo "Verifying installation..."
+        if ! "${INSTALL_DIR}/uv" --version; then
+          echo "::error::Installed binary failed --version check"
+          exit 1
+        fi
+
+        ## Export outputs
+        echo "version=${VERSION}" >>"$GITHUB_OUTPUT"
