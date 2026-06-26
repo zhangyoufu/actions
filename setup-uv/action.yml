@@ -114,7 +114,7 @@ runs:
 
         # ── 6. Download ───────────────────────────────────────────────────────
         ARCHIVE_FILE=$(mktemp)
-        echo 'Downloading...''
+        echo 'Downloading...'
         curl -fsSL -o "${ARCHIVE_FILE}" "${URL}"
 
         # ── 7. Verify SHA-256 checksum ────────────────────────────────────────
