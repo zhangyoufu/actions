@@ -1,17 +1,46 @@
 name: Checkout
 description: Alternative to actions/checkout
+inputs:
+  submodules:
+    description: 'Recursively checkout submodules'
+    type: boolean
+    default: false
+    required: false
 runs:
   using: composite
   steps:
+    - name: Set Git HTTP auth header
+      shell: bash
+      run: |-
+        git config set --global 'http.${{ github.server_url }}.extraHeader' "Authorization: Basic $(echo -n 'x-access-token:${{ github.token }}' | base64 -w0)"
+
     - name: Checkout Git repo
       shell: bash
       run: |-
-        git init --initial-branch main .
-        git remote add origin '${{ github.server_url }}/${{ github.repository }}.git'
+        git init --initial-branch dummy .
         git config set --local advice.detachedHead false
-        git config set --local 'http.${{ github.server_url }}.extraHeader' "Authorization: Basic $(echo -n 'x-access-token:${{ github.token }}' | base64 -w0)"
+        git remote add origin '${{ github.server_url }}/${{ github.repository }}.git'
         git fetch --depth 1 origin '${{ github.sha }}'
-        git checkout --progress FETCH_HEAD
+
+        case "$GITHUB_REF" in
+          refs/heads/*)
+            git branch "$GITHUB_REF_NAME" FETCH_HEAD
+            git checkout "$GITHUB_REF_NAME"
+            ;;
+          refs/tags/*)
+            git fetch --depth 1 origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+            git checkout "refs/tags/$GITHUB_REF_NAME"
+            ;;
+          *)
+            # GITHUB_REF is neither branch nor tag (e.g. pull request merge ref).
+            # Leave FETCH_HEAD as detached head.
+            git checkout FETCH_HEAD
+            ;;
+        esac
+
+        if [ '${{ inputs.submodules }}' = 'true' ]; then
+          git submodule update --init --recursive --depth 1
+        fi
 
     - name: Configure Git user name/email
       shell: bash
