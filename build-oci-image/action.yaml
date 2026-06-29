@@ -164,7 +164,9 @@ runs:
       shell: bash
       run: |-
         docker inspect buildkitd >/dev/null 2>&1 || {
-          docker run -d --name buildkitd --privileged moby/buildkit:latest
+          CONFIG_FILE=$(mktemp)
+          printf '[worker.oci]\nmax-parallelism = %d\n' "$(nproc)" >"${CONFIG_FILE}"
+          docker run -d --name buildkitd --privileged -v ${CONFIG_FILE}:/etc/buildkit/buildkitd.toml:ro moby/buildkit:latest
         }
         command -v buildctl >/dev/null 2>&1 || {
           docker cp buildkitd:/usr/bin/buildctl /usr/local/bin/buildctl
