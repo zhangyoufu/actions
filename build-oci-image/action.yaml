@@ -1,0 +1,300 @@
+name: Build OCI Image
+description: |-
+  Build multi-platform OCI images using buildkitd and buildctl.
+  See https://github.com/moby/buildkit/blob/master/docs/reference/buildctl.md
+
+  All inputs that accept multi-line values ignore empty lines
+  and lines whose first character is `#`.
+
+inputs:
+
+  ## --local: Allow build access to the local directory.
+
+  context:
+    description: |-
+      Path to the build context.
+      Maps to `--local context=<path>`.
+      Defaults to current working directory.
+    required: false
+    default: .
+
+  dockerfile:
+    description: |-
+      Path to the directory containing the Dockerfile.
+      Maps to `--local dockerfile=<path>`.
+      Defaults to the same value as `context` when empty.
+    required: false
+    default: ""
+
+  additional-local:
+    description: |-
+      Additional local directories, one pair per line.
+      Maps to `--local <name>=<dir>`.
+    required: false
+    default: ""
+
+  ## --opt: Define custom options for frontend.
+
+  cross-arch-emulation:
+    description: |-
+      Install qemu-user-binfmt (available in Debian / Ubuntu) for cross-architecture emulation.
+      Set to "false" to skip.
+    required: false
+    default: "true"
+
+  platform:
+    description: |-
+      Target platforms, one per line.
+      Maps to `--opt platform=<platform>,...`.
+      Defaults to `linux/amd64` and `linux/arm64/v8`.
+      See https://github.com/moby/buildkit/blob/8e99dc1f10bf903712c228b49405d6f9b3d835c8/docs/multi-platform.md
+    required: false
+    default: |-
+      linux/amd64
+      linux/arm64/v8
+
+  build-arg:
+    description: |-
+      Build arguments, one pair per line.
+      Maps to `--opt build-arg:<key>=<value>`.
+    required: false
+    default: ""
+
+  target:
+    description: |-
+      Name of the target stage to be built.
+      Maps to `--opt target=<target>`. Omitted when not specified.
+    required: false
+    default: ""
+
+  additional-context:
+    description: |-
+      Additional build contexts, one pair per line.
+      Maps to `--opt context:<source>=<target>`.
+    required: false
+    default: ""
+
+  sbom:
+    description: |-
+      Generate and attach SBOM attestation.
+      Maps to `--opt attest:sbom=...`. Omitted when not specified.
+      See https://github.com/moby/buildkit/blob/8e99dc1f10bf903712c228b49405d6f9b3d835c8/docs/attestations/sbom.md
+    required: false
+    default: ""
+
+  provenance:
+    description: |-
+      Generate and attach provenance attestation.
+      Maps to `--opt attest:provenance=...`. Omitted when not specified.
+      See https://github.com/moby/buildkit/blob/8e99dc1f10bf903712c228b49405d6f9b3d835c8/docs/attestations/slsa-provenance.md
+    required: false
+    default: ""
+
+  ## --output: Define exports for build result.
+
+  image:
+    description: |-
+      OCI image name — MUST include the registry host.
+      Maps to `--output image,name=<image>:<image-tag>,...`.
+      Defaults to `ghcr.io/<owner>/<repo>`.
+    required: false
+    default: ghcr.io/${{ github.repository }}
+
+  image-tag:
+    description: |-
+      Image tags, one per line.
+      Maps to `--output image,name=<image>:<image-tag>,...`.
+      Defaults to `latest`.
+    required: false
+    default: latest
+
+  annotation:
+    description: |-
+      OCI annotations, one per line.
+      Maps to `--output image,<annotation-type>[<platform>].<key>=<value>,...`.
+      See https://github.com/moby/buildkit/blob/8e99dc1f10bf903712c228b49405d6f9b3d835c8/docs/annotations.md
+    required: false
+    default: ""
+
+  push:
+    description: |-
+      Push the image to the registry.
+      Maps to `--output image,push=<push>,...`.
+      Defaults to false.
+    required: false
+    default: "false"
+
+  store:
+    description: |-
+      Store the result images in the image store.
+      Maps to `--output image,store=<store>,...`.
+      Defaults to true.
+    required: false
+    default: "true"
+
+  ## registry authentication credential
+
+  registry-username:
+    description: |-
+      Username for registry authentication.
+      Defaults to `github.actor` when image matches `ghcr.io/*`.
+    required: false
+    default: ""
+
+  registry-password:
+    description: |-
+      Password / token for registry authentication.
+      Defaults to `github.token` when image matches `ghcr.io/*`.
+    required: false
+    default: ""
+
+
+runs:
+  using: composite
+  steps:
+
+    - name: Setup QEMU user emulation
+      if: inputs.cross-arch-emulation == 'true'
+      shell: bash
+      run: |-
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq qemu-user-binfmt
+
+    - name: Start buildkitd
+      shell: bash
+      run: |-
+        docker inspect buildkitd >/dev/null 2>&1 || {
+          docker run -d --name buildkitd --privileged moby/buildkit:latest
+        }
+        command -v buildctl >/dev/null 2>&1 || {
+          docker cp buildkitd:/usr/bin/buildctl /usr/local/bin/buildctl
+        }
+        if [ -z "${BUILDKIT_HOST:-}" ]; then
+          echo "BUILDKIT_HOST=docker-container://buildkitd" >> "${GITHUB_ENV}"
+        fi
+
+    - name: Show buildkitd/dockerfile/buildctl version
+      shell: bash
+      run: |-
+        buildctl debug info
+        buildctl --version
+
+    - name: Log in to image registry
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        REGISTRY_USERNAME: ${{ inputs.registry-username }}
+        REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |-
+        set -u
+
+        case "${IMAGE}" in
+          ghcr.io/*)
+            [ -z "${REGISTRY_USERNAME}" ] && [ -z "${REGISTRY_PASSWORD}" ] && {
+              REGISTRY_USERNAME="${GITHUB_ACTOR}"
+              REGISTRY_PASSWORD="${GITHUB_TOKEN}"
+            }
+            ;;
+        esac
+        if [ -n "${REGISTRY_USERNAME}" ] && [ -n "${REGISTRY_PASSWORD}" ]; then
+          docker login --username "${REGISTRY_USERNAME}" --password-stdin "${IMAGE%%/*}" <<< "${REGISTRY_PASSWORD}"
+        fi
+
+    - name: Build OCI image
+      env:
+        CONTEXT: ${{ inputs.context }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        ADDITIONAL_LOCAL: ${{ inputs.additional-local }}
+        PLATFORM: ${{ inputs.platform }}
+        BUILD_ARG: ${{ inputs.build-arg }}
+        TARGET: ${{ inputs.target }}
+        ADDITIONAL_CONTEXT: ${{ inputs.additional-context }}
+        SBOM: ${{ inputs.sbom }}
+        PROVENANCE: ${{ inputs.provenance }}
+        IMAGE: ${{ inputs.image }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+        ANNOTATION: ${{ inputs.annotation }}
+        PUSH: ${{ inputs.push }}
+        STORE: ${{ inputs.store }}
+      shell: bash
+      run: |-
+        set -u
+
+        ARGS=()
+        ARGS+=(--progress plain)
+        ARGS+=(--frontend dockerfile.v0)
+        ARGS+=(--local "context=${CONTEXT}")
+        ARGS+=(--local "dockerfile=${DOCKERFILE:-${CONTEXT}}")
+
+        while IFS= read -r LINE; do
+          case "${LINE}" in \#*) continue ;; esac
+          [ -z "${LINE}" ] && continue
+          ARGS+=(--local "${LINE}")
+        done <<< "${ADDITIONAL_LOCAL}"
+
+        PLATFORM_CSL=
+        while IFS= read -r LINE; do
+          case "${LINE}" in \#*) continue ;; esac
+          [ -z "${LINE}" ] && continue
+          PLATFORM_CSL="${PLATFORM_CSL},${LINE}"
+        done <<< "${PLATFORM}"
+        ARGS+=(--opt "platform=${PLATFORM_CSL:1}")
+        unset PLATFORM_CSL
+
+        while IFS= read -r LINE; do
+          case "${LINE}" in \#*) continue ;; esac
+          [ -z "${LINE}" ] && continue
+          ARGS+=(--opt "build-arg:${LINE}")
+        done <<< "${BUILD_ARG}"
+
+        if [ -n "${TARGET}" ]; then
+          ARGS+=(--opt "target=${TARGET}")
+        fi
+
+        while IFS= read -r LINE; do
+          case "${LINE}" in \#*) continue ;; esac
+          [ -z "${LINE}" ] && continue
+          ARGS+=(--opt "context:${LINE}")
+        done <<< "${ADDITIONAL_CONTEXT}"
+
+        if [ -n "${SBOM}" ]; then
+          ARGS+=(--opt "attest:type=sbom,${SBOM}")
+        fi
+
+        if [ -n "${PROVENANCE}" ]; then
+          ARGS+=(--opt "attest:type=provenance,${PROVENANCE}")
+        fi
+
+        ## --output type=image,...
+        if [ "${PUSH}" = true ] || [ "${STORE}" = true ]; then
+          OUTPUT=type=image
+          OUTPUT=${OUTPUT},oci-mediatypes=true
+
+          ## --output image,name=<image>:<tag>,...
+          while IFS= read -r LINE; do
+            case "${LINE}" in \#*) continue ;; esac
+            [ -z "${LINE}" ] && continue
+            OUTPUT="${OUTPUT},name=${IMAGE}:${LINE}"
+          done <<< "${IMAGE_TAG}"
+
+          ## --output image,<annotation-type>[<platform>].<key>=<value>,...
+          while IFS= read -r LINE; do
+            case "${LINE}" in \#*) continue ;; esac
+            [ -z "${LINE}" ] && continue
+            OUTPUT="${OUTPUT},${LINE}"
+          done <<< "${ANNOTATION}"
+
+          if [ "${PUSH}" = true ]; then
+            OUTPUT=${OUTPUT},push=true
+          fi
+
+          if [ "${STORE}" = false ]; then
+            OUTPUT=${OUTPUT},store=false
+          fi
+
+          ARGS+=(--output "${OUTPUT}")
+        fi
+
+        buildctl build "${ARGS[@]}"
