@@ -1,0 +1,358 @@
+name: Setup Tailscale
+description: |-
+  Install the latest stable release of Tailscale and authenticate the node with
+  an auth key or workload identity federation.
+
+  All inputs that accept multi-line values ignore empty lines
+  and lines whose first character is `#`.
+
+inputs:
+
+  ## authentication: auth key or workload identity federation
+
+  auth-key:
+    description: |-
+      Node authorization key or OAuth client secret.
+      If it begins with "file:", then it's a path to a file containing the credential.
+    required: false
+    default: ''
+
+  client-id:
+    description: |-
+      Client ID used to generate authkeys via workload identity federation.
+    required: false
+    default: ''
+
+  audience:
+    description: |-
+      Audience used when requesting an ID token from an identity provider for auth keys via workload identity federation.
+    required: false
+    default: ''
+
+  ## node configuration
+
+  accept-dns:
+    description: |-
+      Accept DNS configuration.
+    required: false
+    default: true
+
+  accept-routes:
+    description: |-
+      Accept routes advertised by other Tailscale nodes.
+    required: false
+    default: true
+
+  advertise-connector:
+    description: |-
+      Advertise this node as an app connector.
+    required: false
+    default: false
+
+  advertise-exit-node:
+    description: |-
+      Advertise this node as an exit node.
+    required: false
+    default: false
+
+  advertise-routes:
+    description: |-
+      Routes to advertise to other nodes. One CIDR per line.
+    required: false
+    default: ''
+
+  advertise-tags:
+    description: |-
+      ACL tags to request. One tag per line. The "tag:" prefix is optional.
+    required: false
+    default: ''
+
+  exit-node:
+    description: |-
+      Tailscale exit node (IP, base name, or auto:any) for internet traffic. Empty string disables exit node.
+    required: false
+    default: ''
+
+  hostname:
+    description: |-
+      Hostname to use instead of the one provided by the OS.
+    required: false
+    default: ''
+
+  login-server:
+    description: |-
+      Base URL of control server.
+    required: false
+    default: ''
+
+  report-posture:
+    description: |-
+      Allow management plane to gather device posture information.
+    required: false
+    default: 'false'
+
+  shields-up:
+    description: |-
+      Don't allow incoming connections.
+    required: false
+    default: 'false'
+
+  ssh:
+    description: |-
+      Run an SSH server, permitting access per tailnet admin's declared policy.
+    required: false
+    default: 'false'
+
+  ## Miscellaneous
+
+  args:
+    description: |-
+      Additional arguments passed through to `tailscale up`.
+    required: false
+    default: ''
+
+outputs:
+  version:
+    description: 'The version of Tailscale that was installed.'
+    value: ${{ steps.version.outputs.version }}
+  hostname:
+    description: 'The Tailscale hostname of the node.'
+    value: ${{ steps.online.outputs.hostname }}
+  ip:
+    description: 'The Tailscale IPv4 address of the node.'
+    value: ${{ steps.online.outputs.ip }}
+
+runs:
+  using: composite
+  steps:
+
+    - id: install
+      shell: bash
+      run: |-
+        set -u
+
+        ## Map the GitHub Actions runner to a Tailscale platform
+        echo "Runner: ${RUNNER_OS} / ${RUNNER_ARCH}"
+
+        case "${RUNNER_OS}" in
+          Linux)   TS_OS=linux ;;
+          macOS)   TS_OS=macos ;;
+          Windows) TS_OS=windows ;;
+          *)
+            echo "::error::Unsupported OS ${RUNNER_OS}"
+            exit 1
+            ;;
+        esac
+
+        case "${RUNNER_ARCH}" in
+          X86)   TS_ARCH=386 ;;
+          X64)   TS_ARCH=amd64 ;;
+          ARM)   TS_ARCH=arm ;;
+          ARM64) TS_ARCH=arm64 ;;
+          *)
+            echo "::error::Unsupported architecture ${RUNNER_ARCH}"
+            exit 1
+            ;;
+        esac
+
+        ## Install Tailscale
+        echo 'Fetching latest stable version...'
+        MANIFEST=$(curl -fsSL "https://pkgs.tailscale.com/stable/?mode=json")
+
+        case "${TS_OS}" in
+          linux)
+            # Tarballs uses GOARCH keys: amd64, arm64, 386, arm
+            VERSION=$(jq -r '.TarballsVersion' <<< "${MANIFEST}")
+            echo "Version: ${VERSION}"
+            TARBALL=$(jq -r --arg a "${TS_ARCH}" '.Tarballs[$a]' <<< "${MANIFEST}")
+            TARBALL_URL="https://pkgs.tailscale.com/stable/${TARBALL}"
+            echo "Downloading ${TARBALL_URL}..."
+            DIR=$(mktemp -d)
+            curl -fsSL "${TARBALL_URL}" | tar -xz -C "${DIR}" --strip-components=1
+            sudo install -o root -g root -m 755 "${DIR}/tailscaled" /usr/sbin/tailscaled
+            sudo install -o root -g root -m 755 "${DIR}/tailscale" /usr/bin/tailscale
+            sudo install -o root -g root -m 644 -t /usr/lib/systemd/system/ "${DIR}"/systemd/*
+            rm -rf "${DIR}"
+            sudo systemctl daemon-reload
+            sudo systemctl start tailscaled.service
+            ;;
+          macos)
+            # There are three macOS variants:
+            #  - Standalone (distributed by Tailscale Inc.)
+            #  - Mac App Store (distributed by Apple Inc.)
+            #  - open source
+            # There are many differences between them. See https://tailscale.com/docs/concepts/macos-variants.
+            # We choose the open source variant for the following reasons:
+            #  - support Tailscale Funnel
+            #  - not limited by sandbox, thus can be a Tailscale SSH server
+            echo 'Installing Tailscale via Homebrew...'
+            brew install tailscale
+            sudo brew services start tailscale
+            ;;
+          windows)
+            # MSIs uses x86 / amd64 / arm64 keys
+            VERSION=$(jq -r '.MSIsVersion' <<< "${MANIFEST}")
+            echo "Version: ${VERSION}"
+            MSI_NAME=$(jq -r --arg a "${TS_ARCH}" '.MSIs[$a]' <<< "${MANIFEST}")
+            MSI_URL="https://pkgs.tailscale.com/stable/${MSI_NAME}"
+            echo "Downloading ${MSI_URL}..."
+            curl -fsSL -o "${RUNNER_TEMP}\\${MSI_NAME}" "${MSI_URL}"
+            echo 'Installing Tailscale MSI...'
+            msiexec /i "${RUNNER_TEMP}\\${MSI_NAME}" /quiet /qn /norestart
+            # Make tailscale available on PATH for subsequent steps
+            echo 'C:\Program Files\Tailscale' >> "${GITHUB_PATH}"
+            # The MSI runs asynchronously — wait for the binary to appear
+            for i in $(seq 1 10); do
+              if [ -f 'C:\Program Files\Tailscale\tailscale.exe' ]; then
+                break
+              fi
+              sleep 1
+            done
+            # Ensure the service is running
+            sc start Tailscale
+            ;;
+        esac
+
+    - id: version
+      shell: bash
+      run: echo "version=$(tailscale --version | tee /dev/stderr | head -n1)" >> "${GITHUB_OUTPUT}"
+
+    - id: configure
+      shell: bash
+      env:
+        AUTH_KEY: ${{ inputs.auth-key }}
+        CLIENT_ID: ${{ inputs.client-id }}
+        AUDIENCE: ${{ inputs.audience }}
+        ACCEPT_DNS: ${{ inputs.accept-dns }}
+        ACCEPT_ROUTES: ${{ inputs.accept-routes }}
+        ADVERTISE_CONNECTOR: ${{ inputs.advertise-connector }}
+        ADVERTISE_EXIT_NODE: ${{ inputs.advertise-exit-node }}
+        ADVERTISE_ROUTES: ${{ inputs.advertise-routes }}
+        ADVERTISE_TAGS: ${{ inputs.advertise-tags }}
+        EXIT_NODE: ${{ inputs.exit-node }}
+        HOSTNAME: ${{ inputs.hostname }}
+        LOGIN_SERVER: ${{ inputs.login-server }}
+        REPORT_POSTURE: ${{ inputs.report-posture }}
+        SHIELDS_UP: ${{ inputs.shields-up }}
+        SSH: ${{ inputs.ssh }}
+        ARGS: ${{ inputs.args }}
+      run: |-
+        set -u
+
+        if [ "${RUNNER_OS}" = Windows ]; then
+          ts() { tailscale "$@"; }
+        else
+          ts() { sudo tailscale "$@"; }
+        fi
+
+        TS_SET_ARGS=(
+          --auto-update=false
+          --update-check=false
+          --webclient=false
+        )
+
+        echo "> tailscale set ${TS_SET_ARGS[*]}"
+        ts set "${TS_SET_ARGS[@]}"
+
+        TS_UP_ARGS=()
+
+        if [ -n "${AUTH_KEY}" ]; then
+          TS_UP_ARGS+=(--auth-key="${AUTH_KEY}")
+        elif [ -n "${CLIENT_ID}" ] && [ -n "${AUDIENCE}" ]; then
+          TS_UP_ARGS+=(--client-id="${CLIENT_ID}")
+          TS_UP_ARGS+=(--audience="${AUDIENCE}")
+        fi
+
+        if [ "${ACCEPT_DNS}" = 'false' ]; then
+          TS_UP_ARGS+=(--accept-dns=false)
+        fi
+
+        if [ "${ACCEPT_ROUTES}" = 'false' ]; then
+          TS_UP_ARGS+=(--accept-routes=false)
+        fi
+
+        if [ "${ADVERTISE_CONNECTOR}" = 'true' ]; then
+          TS_UP_ARGS+=(--advertise-connector)
+        fi
+
+        if [ "${ADVERTISE_EXIT_NODE}" = 'true' ]; then
+          TS_UP_ARGS+=(--advertise-exit-node)
+        fi
+
+        if [ -n "${ADVERTISE_ROUTES}" ]; then
+          ADVERTISE_ROUTES_LIST=''
+          while IFS= read -r LINE; do
+            case "${LINE}" in \#*) continue ;; esac
+            [ -z "${LINE}" ] && continue
+            ADVERTISE_ROUTES_LIST="${ADVERTISE_ROUTES_LIST},${LINE}"
+          done <<< "${ADVERTISE_ROUTES}"
+          TS_UP_ARGS+=(--advertise-routes="${ADVERTISE_ROUTES_LIST:1}")
+        fi
+
+        if [ -n "${ADVERTISE_TAGS}" ]; then
+          ADVERTISE_TAGS_LIST=''
+          while IFS= read -r LINE; do
+            case "${LINE}" in \#*) continue ;; esac
+            [ -z "${LINE}" ] && continue
+            ADVERTISE_TAGS_LIST="${ADVERTISE_TAGS_LIST},${LINE}"
+          done <<< "${ADVERTISE_TAGS}"
+          TS_UP_ARGS+=(--advertise-tags="${ADVERTISE_TAGS_LIST:1}")
+        fi
+
+        if [ -n "${EXIT_NODE}" ]; then
+          TS_UP_ARGS+=(--exit-node="${EXIT_NODE}")
+        fi
+
+        if [ -n "${HOSTNAME}" ]; then
+          TS_UP_ARGS+=(--hostname="${HOSTNAME}")
+        fi
+
+        if [ -n "${LOGIN_SERVER}" ]; then
+          TS_UP_ARGS+=(--login-server="${LOGIN_SERVER}")
+        fi
+
+        if [ "${REPORT_POSTURE}" = 'true' ]; then
+          TS_UP_ARGS+=(--report-posture)
+        fi
+
+        if [ "${SHIELDS_UP}" = 'true' ]; then
+          TS_UP_ARGS+=(--shields-up)
+        fi
+
+        if [ "${SSH}" = 'true' ]; then
+          TS_UP_ARGS+=(--ssh)
+        fi
+
+        if [ -n "${ARGS}" ]; then
+          # shellcheck disable=SC2086
+          TS_UP_ARGS+=(${ARGS})
+        fi
+
+        echo "> tailscale up ${TS_UP_ARGS[*]}"
+        ts up "${TS_UP_ARGS[@]}"
+
+    - id: online
+      shell: bash
+      run: |-
+        set -u
+
+        if [ "${RUNNER_OS}" = Windows ]; then
+          ts() { tailscale "$@"; }
+        else
+          ts() { sudo tailscale "$@"; }
+        fi
+
+        echo 'Waiting for Tailscale to come online...'
+        for i in $(seq 1 30); do
+          if ts status --json 2>/dev/null | jq -e '.Self.Online' >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+
+        TS_STATUS=$(ts status --json)
+        NODE_HOSTNAME=$(jq -r '.Self.HostName // ""' <<< "${TS_STATUS}")
+        NODE_IP=$(jq -r '.Self.TailscaleIPs[0] // ""' <<< "${TS_STATUS}")
+
+        echo "hostname=${NODE_HOSTNAME}" >> "${GITHUB_OUTPUT}"
+        echo "ip=${NODE_IP}" >> "${GITHUB_OUTPUT}"
