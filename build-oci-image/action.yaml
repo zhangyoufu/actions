@@ -10,25 +10,9 @@ inputs:
 
   ## --local: Allow build access to the local directory.
 
-  context:
+  local:
     description: |-
-      Path to the build context.
-      Maps to `--local context=<path>`.
-      Defaults to current working directory.
-    required: false
-    default: .
-
-  dockerfile:
-    description: |-
-      Path to the directory containing the Dockerfile.
-      Maps to `--local dockerfile=<path>`.
-      Defaults to the same value as `context` when empty.
-    required: false
-    default: ""
-
-  additional-local:
-    description: |-
-      Additional local directories, one pair per line.
+      Allow build access to the local directory, one pair per line.
       Maps to `--local <name>=<dir>`.
     required: false
     default: ""
@@ -53,6 +37,35 @@ inputs:
       linux/amd64
       linux/arm64/v8
 
+  context:
+    description: |-
+      Build context.
+      Maps to `--opt context=<context>`.
+
+      When `--local context=`, `--local dockerfile=` and `--opt context=` are all not specified, `--opt context=` defaults to current GitHub repository, authenticate by GITHUB_TOKEN, fetch by commit, ref name applied locally, submodules synchronized.
+      Otherwise, this flag is omitted when not specified.
+    required: false
+    default: ""
+
+  # GitRef allows the following query param within context URL:
+  #  - `ref=`
+  #  - `branch=`
+  #  - `tag=`
+  #  - `subdir=<relative-path>`
+  #  - `checksum=<commit>`/`commit=<commit>`
+  #  - `keep-git-dir=<bool>`
+  #  - `submodules=<bool>`
+  #  - `fetch-by-commit=<bool>`
+  #  - `mtime=checkout/commit`
+  # See https://github.com/moby/buildkit/blob/1b593c4e017de3980fb2084249fce3136d6c9498/frontend/dockerfile/dfgitutil/git_ref.go#L181.
+
+  additional-context:
+    description: |-
+      Additional build contexts, one pair per line.
+      Maps to `--opt context:<source>=<target>`.
+    required: false
+    default: ""
+
   build-arg:
     description: |-
       Build arguments, one pair per line.
@@ -64,13 +77,6 @@ inputs:
     description: |-
       Name of the target stage to be built.
       Maps to `--opt target=<target>`. Omitted when not specified.
-    required: false
-    default: ""
-
-  additional-context:
-    description: |-
-      Additional build contexts, one pair per line.
-      Maps to `--opt context:<source>=<target>`.
     required: false
     default: ""
 
@@ -206,13 +212,13 @@ runs:
 
     - name: Build OCI image
       env:
-        CONTEXT: ${{ inputs.context }}
-        DOCKERFILE: ${{ inputs.dockerfile }}
-        ADDITIONAL_LOCAL: ${{ inputs.additional-local }}
+        GITHUB_TOKEN: ${{ github.token }} 
+        LOCAL: ${{ inputs.local }}
         PLATFORM: ${{ inputs.platform }}
+        CONTEXT: ${{ inputs.context }}
+        ADDITIONAL_CONTEXT: ${{ inputs.additional-context }}
         BUILD_ARG: ${{ inputs.build-arg }}
         TARGET: ${{ inputs.target }}
-        ADDITIONAL_CONTEXT: ${{ inputs.additional-context }}
         SBOM: ${{ inputs.sbom }}
         PROVENANCE: ${{ inputs.provenance }}
         IMAGE: ${{ inputs.image }}
@@ -227,14 +233,14 @@ runs:
         ARGS=()
         ARGS+=(--progress plain)
         ARGS+=(--frontend dockerfile.v0)
-        ARGS+=(--local "context=${CONTEXT}")
-        ARGS+=(--local "dockerfile=${DOCKERFILE:-${CONTEXT}}")
 
+        NO_DEFAULT_CONTEXT=
         while IFS= read -r LINE; do
           case "${LINE}" in \#*) continue ;; esac
           [ -z "${LINE}" ] && continue
           ARGS+=(--local "${LINE}")
-        done <<< "${ADDITIONAL_LOCAL}"
+          case "${LINE}" in context=*|dockerfile=*) NO_DEFAULT_CONTEXT=1 ;; esac
+        done <<< "${LOCAL}"
 
         PLATFORM_CSL=
         while IFS= read -r LINE; do
@@ -245,6 +251,19 @@ runs:
         ARGS+=(--opt "platform=${PLATFORM_CSL:1}")
         unset PLATFORM_CSL
 
+        if [ -z "${CONTEXT}"] && [ -z "${NO_DEFAULT_CONTEXT}" ]; then
+          CONTEXT="${GITHUB_SERVER_URL%%//*}//x-access-token:${GITHUB_TOKEN}@${GITHUB_SERVER_URL#*//}/${GITHUB_REPOSITORY}.git?ref=$(jq -nr 'env.GITHUB_REF | @uri')&commit=${GITHUB_SHA}&keep-git-dir=true&submodules=true&fetch-by-commit=true"
+        fi
+        if [ -n "${CONTEXT}" ]; then
+          ARGS+=(--opt "context=${CONTEXT}")
+        fi
+
+        while IFS= read -r LINE; do
+          case "${LINE}" in \#*) continue ;; esac
+          [ -z "${LINE}" ] && continue
+          ARGS+=(--opt "context:${LINE}")
+        done <<< "${ADDITIONAL_CONTEXT}"
+
         while IFS= read -r LINE; do
           case "${LINE}" in \#*) continue ;; esac
           [ -z "${LINE}" ] && continue
@@ -254,12 +273,6 @@ runs:
         if [ -n "${TARGET}" ]; then
           ARGS+=(--opt "target=${TARGET}")
         fi
-
-        while IFS= read -r LINE; do
-          case "${LINE}" in \#*) continue ;; esac
-          [ -z "${LINE}" ] && continue
-          ARGS+=(--opt "context:${LINE}")
-        done <<< "${ADDITIONAL_CONTEXT}"
 
         if [ -n "${SBOM}" ]; then
           ARGS+=(--opt "attest:type=sbom,${SBOM}")
