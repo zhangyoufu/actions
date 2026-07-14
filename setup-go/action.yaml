@@ -1,0 +1,68 @@
+name: Install Go Toolchain
+description: Install the latest stable Go release
+runs:
+  using: composite
+  steps:
+    - name: Find latest stable Go release
+      id: latest-go-release
+      shell: bash
+      run: |-
+        case "$RUNNER_OS" in
+          macOS)   OS=darwin;;
+          Linux)   OS=linux;;
+          Windows) OS=windows;;
+          *) echo "Unsupported OS: ${RUNNER_OS}"; exit 1;;
+        esac
+
+        case "$RUNNER_ARCH" in
+          X64)   ARCH=amd64;;
+          ARM64) ARCH=arm64;;
+          X86)   ARCH=386;;
+          ARM)   ARCH=arm;;
+          *) echo "Unsupported architecture: ${RUNNER_ARCH}"; exit 1;;
+        esac
+
+        export OS ARCH
+
+        FILENAME=$(curl -fsSL 'https://go.dev/dl/?mode=json' | jq -r '
+          map(select(.stable)) | .[0].files | 
+          map(select(.os == env.OS and .arch == env.ARCH and (if env.OS == "windows" then .kind == "installer" else .kind == "archive" end))) | 
+          .[0].filename
+        ')
+
+        if [ -z "${FILENAME}" ] || [ "${FILENAME}" = "null" ]; then
+          echo "Error: Could not resolve a valid Go release for OS=${OS} and ARCH=${ARCH}"
+          exit 1
+        fi
+
+        echo "filename: ${FILENAME}"
+        echo "filename=${FILENAME}" >> ${GITHUB_OUTPUT}
+
+    - name: Install Go (Linux & macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        FILENAME: ${{ steps.latest-go-release.filename }}
+      run: |-
+        if [ -e "/opt/go" ]; then
+          echo "Error: /opt/go already exists. Aborting installation."
+          exit 1
+        fi
+        echo "Downloading ${FILENAME}..."
+        curl -fSL "https://go.dev/dl/${FILENAME}" | sudo tar -xzf - -C /opt
+        echo /opt/go/bin >> ${GITHUB_PATH}
+        /opt/go/bin/go version
+
+    - name: Install Go (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        FILENAME: ${{ steps.latest-go-release.filename }}
+      run: |-
+        $msiPath = Join-Path $env:TEMP $env:FILENAME
+        Write-Output "Downloading to $msiPath..."
+        curl.exe -fSL "https://go.dev/dl/$env:FILENAME" -o $msiPath
+        Start-Process msiexec.exe -ArgumentList "/i", $msiPath, "/qn", "/norestart" -Wait
+        Remove-Item $msiPath -Force
+        "C:\Program Files\Go\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        & "C:\Program Files\Go\bin\go.exe" version
